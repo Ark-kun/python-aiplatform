@@ -14,7 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import pathlib
 import proto
+import shutil
+import tempfile
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 from google.api_core import operation
@@ -52,6 +55,15 @@ from google.protobuf import json_format
 
 
 _LOGGER = base.Logger(__name__)
+
+
+_SUPPORTED_MODEL_FILE_NAMES = [
+    "model.pkl",
+    "model.joblib",
+    "model.bst",
+    "saved_model.pb",
+    "saved_model.pbtxt",
+]
 
 
 class Prediction(NamedTuple):
@@ -1472,6 +1484,7 @@ class Model(base.VertexAiResourceNounWithFutureManager):
         location: Optional[str] = None,
         credentials: Optional[auth_credentials.Credentials] = None,
         encryption_spec_key_name: Optional[str] = None,
+        staging_bucket: Optional[str] = None,
         sync=True,
     ) -> "Model":
         """Uploads a model and returns a Model representing the uploaded Model
@@ -1612,6 +1625,9 @@ class Model(base.VertexAiResourceNounWithFutureManager):
                 If set, this Model and all sub-resources of this Model will be secured by this key.
 
                 Overrides encryption_spec_key_name set in aiplatform.init.
+            staging_bucket (str):
+                Optional. Bucket to stage local model artifacts. Overrides
+                staging_bucket set in aiplatform.init.
         Returns:
             model: Instantiated representation of the uploaded model resource.
         Raises:
@@ -1678,6 +1694,34 @@ class Model(base.VertexAiResourceNounWithFutureManager):
             encryption_spec=encryption_spec,
             labels=labels,
         )
+
+        if artifact_uri and not artifact_uri.startswith("gs://"):
+            # Validating the model directory
+            model_dir = pathlib.Path(artifact_uri)
+            if not model_dir.exists():
+                raise ValueError(f"artifact_uri path does not exist: '{artifact_uri}'")
+            if not model_dir.is_dir():
+                raise ValueError(
+                    f"artifact_uri path must be a directory: '{artifact_uri}'"
+                )
+            if not any(
+                (model_dir / file_name).exists()
+                for file_name in _SUPPORTED_MODEL_FILE_NAMES
+            ):
+                raise ValueError(
+                    "artifact_uri directory does not contain any supported model files. "
+                    f"The upload method only supports the following model files: '{_SUPPORTED_MODEL_FILE_NAMES}'"
+                )
+
+            # Uploading the model
+            staged_data_uri = utils.stage_local_data_in_gcs(
+                data_path=str(model_dir),
+                staging_gcs_dir=staging_bucket,
+                project=project,
+                location=location,
+                credentials=credentials,
+            )
+            artifact_uri = staged_data_uri
 
         if artifact_uri:
             managed_model.artifact_uri = artifact_uri
@@ -2373,3 +2417,622 @@ class Model(base.VertexAiResourceNounWithFutureManager):
         _LOGGER.log_action_completed_against_resource("model", "exported", self)
 
         return json_format.MessageToDict(operation_future.metadata.output_info._pb)
+
+    @staticmethod
+    def upload_xgboost_model_file(
+        model_file_path: str,
+        xgboost_version: Optional[str] = None,
+        display_name: Optional[str] = None,
+        description: Optional[str] = None,
+        instance_schema_uri: Optional[str] = None,
+        parameters_schema_uri: Optional[str] = None,
+        prediction_schema_uri: Optional[str] = None,
+        explanation_metadata: Optional[explain.ExplanationMetadata] = None,
+        explanation_parameters: Optional[explain.ExplanationParameters] = None,
+        project: Optional[str] = None,
+        location: Optional[str] = None,
+        credentials: Optional[auth_credentials.Credentials] = None,
+        labels: Optional[Dict[str, str]] = None,
+        encryption_spec_key_name: Optional[str] = None,
+        staging_bucket: Optional[str] = None,
+        sync=True,
+    ):
+        """Uploads a model and returns a Model representing the uploaded Model
+        resource.
+
+        Note: This function is *experimental* and can be changed in the future.
+
+        Example usage::
+
+            my_model = Model.upload_xgboost_model_file(
+                model_file_path="iris.xgboost_model.bst"
+            )
+
+        Args:
+            model_file_path (str): Required. Local file path of the model.
+            xgboost_version (str): Optional. The version of the XGBoost serving container.
+                Supported versions: ["0.82", "0.90", "1.1", "1.2", "1.3", "1.4"].
+                If the version is not specified, the latest version is used.
+            display_name (str):
+                Optional. The display name of the Model. The name can be up to 128
+                characters long and can be consist of any UTF-8 characters.
+            description (str):
+                The description of the model.
+            instance_schema_uri (str):
+                Optional. Points to a YAML file stored on Google Cloud
+                Storage describing the format of a single instance, which
+                are used in
+                ``PredictRequest.instances``,
+                ``ExplainRequest.instances``
+                and
+                ``BatchPredictionJob.input_config``.
+                The schema is defined as an OpenAPI 3.0.2 `Schema
+                Object <https://tinyurl.com/y538mdwt#schema-object>`__.
+                AutoML Models always have this field populated by AI
+                Platform. Note: The URI given on output will be immutable
+                and probably different, including the URI scheme, than the
+                one given on input. The output URI will point to a location
+                where the user only has a read access.
+            parameters_schema_uri (str):
+                Optional. Points to a YAML file stored on Google Cloud
+                Storage describing the parameters of prediction and
+                explanation via
+                ``PredictRequest.parameters``,
+                ``ExplainRequest.parameters``
+                and
+                ``BatchPredictionJob.model_parameters``.
+                The schema is defined as an OpenAPI 3.0.2 `Schema
+                Object <https://tinyurl.com/y538mdwt#schema-object>`__.
+                AutoML Models always have this field populated by AI
+                Platform, if no parameters are supported it is set to an
+                empty string. Note: The URI given on output will be
+                immutable and probably different, including the URI scheme,
+                than the one given on input. The output URI will point to a
+                location where the user only has a read access.
+            prediction_schema_uri (str):
+                Optional. Points to a YAML file stored on Google Cloud
+                Storage describing the format of a single prediction
+                produced by this Model, which are returned via
+                ``PredictResponse.predictions``,
+                ``ExplainResponse.explanations``,
+                and
+                ``BatchPredictionJob.output_config``.
+                The schema is defined as an OpenAPI 3.0.2 `Schema
+                Object <https://tinyurl.com/y538mdwt#schema-object>`__.
+                AutoML Models always have this field populated by AI
+                Platform. Note: The URI given on output will be immutable
+                and probably different, including the URI scheme, than the
+                one given on input. The output URI will point to a location
+                where the user only has a read access.
+            explanation_metadata (explain.ExplanationMetadata):
+                Optional. Metadata describing the Model's input and output for explanation.
+                Both `explanation_metadata` and `explanation_parameters` must be
+                passed together when used. For more details, see
+                `Ref docs <http://tinyurl.com/1igh60kt>`
+            explanation_parameters (explain.ExplanationParameters):
+                Optional. Parameters to configure explaining for Model's predictions.
+                For more details, see `Ref docs <http://tinyurl.com/1an4zake>`
+            project: Optional[str]=None,
+                Project to upload this model to. Overrides project set in
+                aiplatform.init.
+            location: Optional[str]=None,
+                Location to upload this model to. Overrides location set in
+                aiplatform.init.
+            credentials: Optional[auth_credentials.Credentials]=None,
+                Custom credentials to use to upload this model. Overrides credentials
+                set in aiplatform.init.
+            labels (Dict[str, str]):
+                Optional. The labels with user-defined metadata to
+                organize your Models.
+                Label keys and values can be no longer than 64
+                characters (Unicode codepoints), can only
+                contain lowercase letters, numeric characters,
+                underscores and dashes. International characters
+                are allowed.
+                See https://goo.gl/xmQnxf for more information
+                and examples of labels.
+            encryption_spec_key_name (Optional[str]):
+                Optional. The Cloud KMS resource identifier of the customer
+                managed encryption key used to protect the model. Has the
+                form:
+                ``projects/my-project/locations/my-region/keyRings/my-kr/cryptoKeys/my-key``.
+                The key needs to be in the same region as where the compute
+                resource is created.
+
+                If set, this Model and all sub-resources of this Model will be secured by this key.
+
+                Overrides encryption_spec_key_name set in aiplatform.init.
+            staging_bucket (str):
+                Optional. Bucket to stage local model artifacts. Overrides
+                staging_bucket set in aiplatform.init.
+        Returns:
+            model: Instantiated representation of the uploaded model resource.
+        Raises:
+            ValueError: If only `explanation_metadata` or `explanation_parameters`
+                is specified.
+        """
+        # https://cloud.google.com/vertex-ai/docs/predictions/pre-built-containers#xgboost
+        XGBOOST_SUPPORTED_VERSIONS = ["0.82", "0.90", "1.1", "1.2", "1.3", "1.4"]
+        XGBOOST_CONTAINER_IMAGE_URI_TEMPLATE = (
+            "{registry}/vertex-ai/prediction/xgboost-{cpu_or_gpu}.{version}:latest"
+        )
+
+        XGBOOST_SUPPORTED_MODEL_FILE_EXTENSIONS = [
+            ".pkl",
+            ".joblib",
+            ".bst",
+        ]
+
+        if xgboost_version is None:
+            # Using the latest version
+            xgboost_version = XGBOOST_SUPPORTED_VERSIONS[-1]
+            _LOGGER.info(f"Using the {xgboost_version} version of XGBoost.")
+
+        if xgboost_version not in XGBOOST_SUPPORTED_VERSIONS:
+            _LOGGER.error(
+                f"XGBoost version {xgboost_version} is not supported. "
+                f"Supported versions: {XGBOOST_SUPPORTED_VERSIONS}"
+            )
+
+        model_file_path_obj = pathlib.Path(model_file_path)
+        if not model_file_path_obj.is_file():
+            raise ValueError(
+                f"model_file_path path must point to a file: '{model_file_path}'"
+            )
+
+        model_file_extension = model_file_path_obj.suffix
+        if model_file_extension not in XGBOOST_SUPPORTED_MODEL_FILE_EXTENSIONS:
+            _LOGGER.warning(
+                f"Only the following XGBoost model file extensions are currently supported: '{XGBOOST_SUPPORTED_MODEL_FILE_EXTENSIONS}'"
+            )
+            _LOGGER.warning(
+                "Treating the model file as a binary serialized XGBoost Booster."
+            )
+            model_file_extension = ".bst"
+
+        # Preparing model directory
+        prepared_model_dir = tempfile.mkdtemp()
+        prepared_model_file_path = pathlib.Path(prepared_model_dir) / (
+            "model" + model_file_extension
+        )
+        shutil.copy(model_file_path_obj, prepared_model_file_path)
+
+        container_image_uri = XGBOOST_CONTAINER_IMAGE_URI_TEMPLATE.format(
+            registry=_get_container_registry(
+                location or aiplatform.initializer.global_config.location
+            ),
+            cpu_or_gpu="cpu",
+            version=xgboost_version.replace(".", "-"),
+        )
+
+        display_name = display_name or "XGBoost model"
+
+        return aiplatform.Model.upload(
+            serving_container_image_uri=container_image_uri,
+            artifact_uri=prepared_model_dir,
+            display_name=display_name,
+            description=description,
+            instance_schema_uri=instance_schema_uri,
+            parameters_schema_uri=parameters_schema_uri,
+            prediction_schema_uri=prediction_schema_uri,
+            explanation_metadata=explanation_metadata,
+            explanation_parameters=explanation_parameters,
+            project=project,
+            location=location,
+            credentials=credentials,
+            labels=labels,
+            encryption_spec_key_name=encryption_spec_key_name,
+            staging_bucket=staging_bucket,
+            sync=sync,
+        )
+
+    @staticmethod
+    def upload_scikit_learn_model_file(
+        model_file_path: str,
+        sklearn_version: Optional[str] = None,
+        display_name: Optional[str] = None,
+        description: Optional[str] = None,
+        instance_schema_uri: Optional[str] = None,
+        parameters_schema_uri: Optional[str] = None,
+        prediction_schema_uri: Optional[str] = None,
+        explanation_metadata: Optional[explain.ExplanationMetadata] = None,
+        explanation_parameters: Optional[explain.ExplanationParameters] = None,
+        project: Optional[str] = None,
+        location: Optional[str] = None,
+        credentials: Optional[auth_credentials.Credentials] = None,
+        labels: Optional[Dict[str, str]] = None,
+        encryption_spec_key_name: Optional[str] = None,
+        staging_bucket: Optional[str] = None,
+        sync=True,
+    ):
+        """Uploads a model and returns a Model representing the uploaded Model
+        resource.
+
+        Note: This function is *experimental* and can be changed in the future.
+
+        Example usage::
+
+            my_model = Model.upload_scikit_learn_model_file(
+                model_file_path="iris.sklearn_model.joblib"
+            )
+
+        Args:
+            model_file_path (str): Required. Local file path of the model.
+            sklearn_version (str):
+                Optional. The version of the Scikit-learn serving container.
+                Supported versions: ["0.20", "0.22", "0.23", "0.24"].
+                If the version is not specified, the latest version is used.
+            display_name (str):
+                Optional. The display name of the Model. The name can be up to 128
+                characters long and can be consist of any UTF-8 characters.
+            description (str):
+                The description of the model.
+            instance_schema_uri (str):
+                Optional. Points to a YAML file stored on Google Cloud
+                Storage describing the format of a single instance, which
+                are used in
+                ``PredictRequest.instances``,
+                ``ExplainRequest.instances``
+                and
+                ``BatchPredictionJob.input_config``.
+                The schema is defined as an OpenAPI 3.0.2 `Schema
+                Object <https://tinyurl.com/y538mdwt#schema-object>`__.
+                AutoML Models always have this field populated by AI
+                Platform. Note: The URI given on output will be immutable
+                and probably different, including the URI scheme, than the
+                one given on input. The output URI will point to a location
+                where the user only has a read access.
+            parameters_schema_uri (str):
+                Optional. Points to a YAML file stored on Google Cloud
+                Storage describing the parameters of prediction and
+                explanation via
+                ``PredictRequest.parameters``,
+                ``ExplainRequest.parameters``
+                and
+                ``BatchPredictionJob.model_parameters``.
+                The schema is defined as an OpenAPI 3.0.2 `Schema
+                Object <https://tinyurl.com/y538mdwt#schema-object>`__.
+                AutoML Models always have this field populated by AI
+                Platform, if no parameters are supported it is set to an
+                empty string. Note: The URI given on output will be
+                immutable and probably different, including the URI scheme,
+                than the one given on input. The output URI will point to a
+                location where the user only has a read access.
+            prediction_schema_uri (str):
+                Optional. Points to a YAML file stored on Google Cloud
+                Storage describing the format of a single prediction
+                produced by this Model, which are returned via
+                ``PredictResponse.predictions``,
+                ``ExplainResponse.explanations``,
+                and
+                ``BatchPredictionJob.output_config``.
+                The schema is defined as an OpenAPI 3.0.2 `Schema
+                Object <https://tinyurl.com/y538mdwt#schema-object>`__.
+                AutoML Models always have this field populated by AI
+                Platform. Note: The URI given on output will be immutable
+                and probably different, including the URI scheme, than the
+                one given on input. The output URI will point to a location
+                where the user only has a read access.
+            explanation_metadata (explain.ExplanationMetadata):
+                Optional. Metadata describing the Model's input and output for explanation.
+                Both `explanation_metadata` and `explanation_parameters` must be
+                passed together when used. For more details, see
+                `Ref docs <http://tinyurl.com/1igh60kt>`
+            explanation_parameters (explain.ExplanationParameters):
+                Optional. Parameters to configure explaining for Model's predictions.
+                For more details, see `Ref docs <http://tinyurl.com/1an4zake>`
+            project: Optional[str]=None,
+                Project to upload this model to. Overrides project set in
+                aiplatform.init.
+            location: Optional[str]=None,
+                Location to upload this model to. Overrides location set in
+                aiplatform.init.
+            credentials: Optional[auth_credentials.Credentials]=None,
+                Custom credentials to use to upload this model. Overrides credentials
+                set in aiplatform.init.
+            labels (Dict[str, str]):
+                Optional. The labels with user-defined metadata to
+                organize your Models.
+                Label keys and values can be no longer than 64
+                characters (Unicode codepoints), can only
+                contain lowercase letters, numeric characters,
+                underscores and dashes. International characters
+                are allowed.
+                See https://goo.gl/xmQnxf for more information
+                and examples of labels.
+            encryption_spec_key_name (Optional[str]):
+                Optional. The Cloud KMS resource identifier of the customer
+                managed encryption key used to protect the model. Has the
+                form:
+                ``projects/my-project/locations/my-region/keyRings/my-kr/cryptoKeys/my-key``.
+                The key needs to be in the same region as where the compute
+                resource is created.
+
+                If set, this Model and all sub-resources of this Model will be secured by this key.
+
+                Overrides encryption_spec_key_name set in aiplatform.init.
+            staging_bucket (str):
+                Optional. Bucket to stage local model artifacts. Overrides
+                staging_bucket set in aiplatform.init.
+        Returns:
+            model: Instantiated representation of the uploaded model resource.
+        Raises:
+            ValueError: If only `explanation_metadata` or `explanation_parameters`
+                is specified.
+        """
+        # https://cloud.google.com/vertex-ai/docs/predictions/pre-built-containers#scikit-learn
+        SKLEARN_SUPPORTED_VERSIONS = ["0.20", "0.22", "0.23", "0.24"]
+        SKLEARN_CONTAINER_IMAGE_URI_TEMPLATE = (
+            "{registry}/vertex-ai/prediction/sklearn-{cpu_or_gpu}.{version}:latest"
+        )
+        SKLEARN_SUPPORTED_MODEL_FILE_EXTENSIONS = [
+            ".pkl",
+            ".joblib",
+        ]
+
+        if sklearn_version is None:
+            # Using the latest version
+            sklearn_version = SKLEARN_SUPPORTED_VERSIONS[-1]
+            _LOGGER.info(f"Using the {sklearn_version} version of Scikit-learn.")
+
+        if sklearn_version not in SKLEARN_SUPPORTED_VERSIONS:
+            _LOGGER.error(
+                f"Scikit-learn version {sklearn_version} is not supported. "
+                f"Supported versions: {SKLEARN_SUPPORTED_VERSIONS}"
+            )
+
+        model_file_path_obj = pathlib.Path(model_file_path)
+        if not model_file_path_obj.is_file():
+            raise ValueError(
+                f"model_file_path path must point to a file: '{model_file_path}'"
+            )
+
+        model_file_extension = model_file_path_obj.suffix
+        if model_file_extension not in SKLEARN_SUPPORTED_MODEL_FILE_EXTENSIONS:
+            _LOGGER.warning(
+                f"Only the following Scikit-learn model file extensions are currently supported: '{SKLEARN_SUPPORTED_MODEL_FILE_EXTENSIONS}'"
+            )
+            _LOGGER.warning(
+                "Treating the model file as a pickle serialized Scikit-learn model."
+            )
+            model_file_extension = ".pkl"
+
+        # Preparing model directory
+        prepared_model_dir = tempfile.mkdtemp()
+        prepared_model_file_path = pathlib.Path(prepared_model_dir) / (
+            "model" + model_file_extension
+        )
+        shutil.copy(model_file_path_obj, prepared_model_file_path)
+
+        container_image_uri = SKLEARN_CONTAINER_IMAGE_URI_TEMPLATE.format(
+            registry=_get_container_registry(
+                location or aiplatform.initializer.global_config.location
+            ),
+            cpu_or_gpu="cpu",
+            version=sklearn_version.replace(".", "-"),
+        )
+
+        display_name = display_name or "Scikit-learn model"
+
+        return aiplatform.Model.upload(
+            serving_container_image_uri=container_image_uri,
+            artifact_uri=prepared_model_dir,
+            display_name=display_name,
+            description=description,
+            instance_schema_uri=instance_schema_uri,
+            parameters_schema_uri=parameters_schema_uri,
+            prediction_schema_uri=prediction_schema_uri,
+            explanation_metadata=explanation_metadata,
+            explanation_parameters=explanation_parameters,
+            project=project,
+            location=location,
+            credentials=credentials,
+            labels=labels,
+            encryption_spec_key_name=encryption_spec_key_name,
+            staging_bucket=staging_bucket,
+            sync=sync,
+        )
+
+    @staticmethod
+    def upload_tensorflow_saved_model(
+        saved_model_dir: str,
+        tensorflow_version: Optional[str] = None,
+        use_gpu: bool = False,
+        display_name: Optional[str] = None,
+        description: Optional[str] = None,
+        instance_schema_uri: Optional[str] = None,
+        parameters_schema_uri: Optional[str] = None,
+        prediction_schema_uri: Optional[str] = None,
+        explanation_metadata: Optional[explain.ExplanationMetadata] = None,
+        explanation_parameters: Optional[explain.ExplanationParameters] = None,
+        project: Optional[str] = None,
+        location: Optional[str] = None,
+        credentials: Optional[auth_credentials.Credentials] = None,
+        labels: Optional[Dict[str, str]] = None,
+        encryption_spec_key_name: Optional[str] = None,
+        staging_bucket: Optional[str] = None,
+        sync=True,
+    ):
+        """Uploads a model and returns a Model representing the uploaded Model
+        resource.
+
+        Note: This function is *experimental* and can be changed in the future.
+
+        Example usage::
+
+            my_model = Model.upload_scikit_learn_model_file(
+                model_file_path="iris.tensorflow_model.SavedModel"
+            )
+
+        Args:
+            saved_model_dir (str): Required.
+                Local directory of the Tensorflow SavedModel.
+            tensorflow_version (str):
+                Optional. The version of the Tensorflow serving container.
+                Supported versions: ["0.15", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6"].
+                If the version is not specified, the latest version is used.
+            use_gpu (bool): Whether to use GPU for model serving.
+            display_name (str):
+                Optional. The display name of the Model. The name can be up to 128
+                characters long and can be consist of any UTF-8 characters.
+            description (str):
+                The description of the model.
+            instance_schema_uri (str):
+                Optional. Points to a YAML file stored on Google Cloud
+                Storage describing the format of a single instance, which
+                are used in
+                ``PredictRequest.instances``,
+                ``ExplainRequest.instances``
+                and
+                ``BatchPredictionJob.input_config``.
+                The schema is defined as an OpenAPI 3.0.2 `Schema
+                Object <https://tinyurl.com/y538mdwt#schema-object>`__.
+                AutoML Models always have this field populated by AI
+                Platform. Note: The URI given on output will be immutable
+                and probably different, including the URI scheme, than the
+                one given on input. The output URI will point to a location
+                where the user only has a read access.
+            parameters_schema_uri (str):
+                Optional. Points to a YAML file stored on Google Cloud
+                Storage describing the parameters of prediction and
+                explanation via
+                ``PredictRequest.parameters``,
+                ``ExplainRequest.parameters``
+                and
+                ``BatchPredictionJob.model_parameters``.
+                The schema is defined as an OpenAPI 3.0.2 `Schema
+                Object <https://tinyurl.com/y538mdwt#schema-object>`__.
+                AutoML Models always have this field populated by AI
+                Platform, if no parameters are supported it is set to an
+                empty string. Note: The URI given on output will be
+                immutable and probably different, including the URI scheme,
+                than the one given on input. The output URI will point to a
+                location where the user only has a read access.
+            prediction_schema_uri (str):
+                Optional. Points to a YAML file stored on Google Cloud
+                Storage describing the format of a single prediction
+                produced by this Model, which are returned via
+                ``PredictResponse.predictions``,
+                ``ExplainResponse.explanations``,
+                and
+                ``BatchPredictionJob.output_config``.
+                The schema is defined as an OpenAPI 3.0.2 `Schema
+                Object <https://tinyurl.com/y538mdwt#schema-object>`__.
+                AutoML Models always have this field populated by AI
+                Platform. Note: The URI given on output will be immutable
+                and probably different, including the URI scheme, than the
+                one given on input. The output URI will point to a location
+                where the user only has a read access.
+            explanation_metadata (explain.ExplanationMetadata):
+                Optional. Metadata describing the Model's input and output for explanation.
+                Both `explanation_metadata` and `explanation_parameters` must be
+                passed together when used. For more details, see
+                `Ref docs <http://tinyurl.com/1igh60kt>`
+            explanation_parameters (explain.ExplanationParameters):
+                Optional. Parameters to configure explaining for Model's predictions.
+                For more details, see `Ref docs <http://tinyurl.com/1an4zake>`
+            project: Optional[str]=None,
+                Project to upload this model to. Overrides project set in
+                aiplatform.init.
+            location: Optional[str]=None,
+                Location to upload this model to. Overrides location set in
+                aiplatform.init.
+            credentials: Optional[auth_credentials.Credentials]=None,
+                Custom credentials to use to upload this model. Overrides credentials
+                set in aiplatform.init.
+            labels (Dict[str, str]):
+                Optional. The labels with user-defined metadata to
+                organize your Models.
+                Label keys and values can be no longer than 64
+                characters (Unicode codepoints), can only
+                contain lowercase letters, numeric characters,
+                underscores and dashes. International characters
+                are allowed.
+                See https://goo.gl/xmQnxf for more information
+                and examples of labels.
+            encryption_spec_key_name (Optional[str]):
+                Optional. The Cloud KMS resource identifier of the customer
+                managed encryption key used to protect the model. Has the
+                form:
+                ``projects/my-project/locations/my-region/keyRings/my-kr/cryptoKeys/my-key``.
+                The key needs to be in the same region as where the compute
+                resource is created.
+
+                If set, this Model and all sub-resources of this Model will be secured by this key.
+
+                Overrides encryption_spec_key_name set in aiplatform.init.
+            staging_bucket (str):
+                Optional. Bucket to stage local model artifacts. Overrides
+                staging_bucket set in aiplatform.init.
+        Returns:
+            model: Instantiated representation of the uploaded model resource.
+        Raises:
+            ValueError: If only `explanation_metadata` or `explanation_parameters`
+                is specified.
+        """
+        # https://cloud.google.com/vertex-ai/docs/predictions/pre-built-containers#tensorflow
+        TENSORFLOW_SUPPORTED_VERSIONS = [
+            "0.15",
+            "2.1",
+            "2.2",
+            "2.3",
+            "2.4",
+            "2.5",
+            "2.6",
+        ]
+        TENSORFLOW_CONTAINER_IMAGE_URI_TEMPLATE = (
+            "{registry}/vertex-ai/prediction/tf{tf2_or_1}-{cpu_or_gpu}.{version}:latest"
+        )
+
+        if tensorflow_version is None:
+            # Using the latest version
+            tensorflow_version = TENSORFLOW_SUPPORTED_VERSIONS[-1]
+            _LOGGER.info(f"Using the {tensorflow_version} version of Tensorflow.")
+
+        if tensorflow_version not in TENSORFLOW_SUPPORTED_VERSIONS:
+            _LOGGER.error(
+                f"Tensorflow version {tensorflow_version} is not supported. "
+                f"Supported versions: {TENSORFLOW_SUPPORTED_VERSIONS}"
+            )
+
+        container_image_uri = TENSORFLOW_CONTAINER_IMAGE_URI_TEMPLATE.format(
+            registry=_get_container_registry(
+                location or aiplatform.initializer.global_config.location
+            ),
+            tf2_or_1=("2" if tensorflow_version.startswith("2.") else ""),
+            cpu_or_gpu="gpu" if use_gpu else "cpu",
+            version=tensorflow_version.replace(".", "-"),
+        )
+
+        display_name = display_name or "Tensorflow model"
+
+        return aiplatform.Model.upload(
+            serving_container_image_uri=container_image_uri,
+            artifact_uri=saved_model_dir,
+            display_name=display_name,
+            description=description,
+            instance_schema_uri=instance_schema_uri,
+            parameters_schema_uri=parameters_schema_uri,
+            prediction_schema_uri=prediction_schema_uri,
+            explanation_metadata=explanation_metadata,
+            explanation_parameters=explanation_parameters,
+            project=project,
+            location=location,
+            credentials=credentials,
+            labels=labels,
+            encryption_spec_key_name=encryption_spec_key_name,
+            staging_bucket=staging_bucket,
+            sync=sync,
+        )
+
+
+def _get_container_registry(location: Optional[str] = None,) -> str:
+    location = location or "us-"
+    if location.startswith("us-"):
+        return "us-docker.pkg.dev"
+    elif location.startswith("europe-"):
+        return "europe-docker.pkg.dev"
+    elif location.startswith("asia-"):
+        return "asia-docker.pkg.dev"
+    else:
+        raise ValueError(f"Unrecognized location: {location}")
