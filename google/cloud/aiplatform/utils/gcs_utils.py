@@ -92,6 +92,7 @@ def upload_to_gcs(
 def stage_local_data_in_gcs(
     data_path: str,
     staging_gcs_dir: Optional[str] = None,
+    staged_file_name: Optional[str] = None,
     project: Optional[str] = None,
     location: Optional[str] = None,
     credentials: Optional[auth_credentials.Credentials] = None,
@@ -105,6 +106,9 @@ def stage_local_data_in_gcs(
         data_path: Required. Path of the local data to copy to GCS.
         staging_gcs_dir:
             Optional. Google Cloud Storage bucket to be used for data staging.
+        staged_file_name:
+            Optional. When staging a single file, staged_file_name parameter can
+            override the name of the staged file.
         project: Optional. Google Cloud Project that contains the staging bucket.
         location: Optional. Google Cloud location to use for the staging bucket.
         credentials: The custom credentials to use when making API calls.
@@ -150,7 +154,8 @@ def stage_local_data_in_gcs(
 
     staged_data_uri = staging_gcs_subdir
     if data_path_obj.is_file():
-        staged_data_uri = staging_gcs_subdir + "/" + data_path_obj.name
+        staged_file_name = staged_file_name or data_path_obj.name
+        staged_data_uri = staging_gcs_subdir + "/" + staged_file_name
 
     _logger.info(f'Uploading "{data_path}" to "{staged_data_uri}"')
     upload_to_gcs(
