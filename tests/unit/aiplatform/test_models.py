@@ -1551,11 +1551,8 @@ class TestModel:
         )
         assert "/vertex_ai_auto_staging/" in upload_model_model.artifact_uri
 
-        # Verifying that the model was renamed to a file name that is acceptable for Model.upload
-        staged_model_file_path = mock_storage_blob_upload_from_filename.call_args[1][
-            "filename"
-        ]
-        staged_model_file_name = staged_model_file_path.split("/")[-1]
+        # Verifying that the model was renamed to a file name that is acceptable for the backend
+        staged_model_file_name = upload_model_model.artifact_uri.split("/", 1)[-1]
         assert staged_model_file_name in [
             "model.bst",
             "model.pkl",
@@ -1607,12 +1604,11 @@ class TestModel:
             f"gs://{_TEST_PROJECT}-vertex-staging-{_TEST_LOCATION}"
         )
         assert "/vertex_ai_auto_staging/" in upload_model_model.artifact_uri
+        print("ZZZ")
+        print(upload_model_model.artifact_uri)
 
-        # Verifying that the model was renamed to a file name that is acceptable for Model.upload
-        staged_model_file_path = mock_storage_blob_upload_from_filename.call_args[1][
-            "filename"
-        ]
-        staged_model_file_name = staged_model_file_path.split("/")[-1]
+        # Verifying that the model was renamed to a file name that is acceptable for the backend
+        staged_model_file_name = upload_model_model.artifact_uri.split("/")[-1]
         assert staged_model_file_name in ["model.pkl", "model.joblib"]
 
     @pytest.mark.parametrize("sync", [True, False])

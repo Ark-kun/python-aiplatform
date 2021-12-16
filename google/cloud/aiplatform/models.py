@@ -2605,35 +2605,37 @@ class Model(base.VertexAiResourceNounWithFutureManager):
             )
             model_file_extension = ".bst"
 
-        # Preparing model directory
-        # We cannot clean up the directory immediately after calling Model.upload since
-        # that call may be asynchronous and return before the model file has been read.
-        # To work around this, we make this method asynchronous (decorate with @base.optional_sync)
-        # but call Model.upload with sync=True.
-        with tempfile.TemporaryDirectory() as prepared_model_dir:
-            prepared_model_file_path = pathlib.Path(prepared_model_dir) / (
-                "model" + model_file_extension
-            )
-            shutil.copy(model_file_path_obj, prepared_model_file_path)
 
-            return cls.upload(
-                serving_container_image_uri=container_image_uri,
-                artifact_uri=prepared_model_dir,
-                display_name=display_name,
-                description=description,
-                instance_schema_uri=instance_schema_uri,
-                parameters_schema_uri=parameters_schema_uri,
-                prediction_schema_uri=prediction_schema_uri,
-                explanation_metadata=explanation_metadata,
-                explanation_parameters=explanation_parameters,
-                project=project,
-                location=location,
-                credentials=credentials,
-                labels=labels,
-                encryption_spec_key_name=encryption_spec_key_name,
-                staging_bucket=staging_bucket,
-                sync=True,
-            )
+        # Uploading the model
+        uploaded_model_uri = gcs_utils.stage_local_data_in_gcs(
+            data_path=model_file_path,
+            staging_gcs_dir=staging_bucket,
+            staged_file_name="model" + model_file_extension,
+            project=project,
+            location=location,
+            credentials=credentials,
+        )
+
+        uploaded_model_dir = uploaded_model_uri.rsplit("/", 1)[0]
+
+        return cls.upload(
+            serving_container_image_uri=container_image_uri,
+            artifact_uri=uploaded_model_dir,
+            display_name=display_name,
+            description=description,
+            instance_schema_uri=instance_schema_uri,
+            parameters_schema_uri=parameters_schema_uri,
+            prediction_schema_uri=prediction_schema_uri,
+            explanation_metadata=explanation_metadata,
+            explanation_parameters=explanation_parameters,
+            project=project,
+            location=location,
+            credentials=credentials,
+            labels=labels,
+            encryption_spec_key_name=encryption_spec_key_name,
+            staging_bucket=staging_bucket,
+            sync=True,
+        )
 
     @classmethod
     @base.optional_sync()
@@ -2800,35 +2802,35 @@ class Model(base.VertexAiResourceNounWithFutureManager):
             )
             model_file_extension = ".pkl"
 
-        # Preparing model directory
-        # We cannot clean up the directory immediately after calling Model.upload since
-        # that call may be asynchronous and return before the model file has been read.
-        # To work around this, we make this method asynchronous (decorate with @base.optional_sync)
-        # but call Model.upload with sync=True.
-        with tempfile.TemporaryDirectory() as prepared_model_dir:
-            prepared_model_file_path = pathlib.Path(prepared_model_dir) / (
-                "model" + model_file_extension
-            )
-            shutil.copy(model_file_path_obj, prepared_model_file_path)
+        # Uploading the model
+        uploaded_model_uri = gcs_utils.stage_local_data_in_gcs(
+            data_path=model_file_path,
+            staging_gcs_dir=staging_bucket,
+            staged_file_name="model" + model_file_extension,
+            project=project,
+            location=location,
+            credentials=credentials,
+        )
+        uploaded_model_dir = uploaded_model_uri.rsplit("/", 1)[0]
 
-            return cls.upload(
-                serving_container_image_uri=container_image_uri,
-                artifact_uri=prepared_model_dir,
-                display_name=display_name,
-                description=description,
-                instance_schema_uri=instance_schema_uri,
-                parameters_schema_uri=parameters_schema_uri,
-                prediction_schema_uri=prediction_schema_uri,
-                explanation_metadata=explanation_metadata,
-                explanation_parameters=explanation_parameters,
-                project=project,
-                location=location,
-                credentials=credentials,
-                labels=labels,
-                encryption_spec_key_name=encryption_spec_key_name,
-                staging_bucket=staging_bucket,
-                sync=True,
-            )
+        return cls.upload(
+            serving_container_image_uri=container_image_uri,
+            artifact_uri=uploaded_model_dir,
+            display_name=display_name,
+            description=description,
+            instance_schema_uri=instance_schema_uri,
+            parameters_schema_uri=parameters_schema_uri,
+            prediction_schema_uri=prediction_schema_uri,
+            explanation_metadata=explanation_metadata,
+            explanation_parameters=explanation_parameters,
+            project=project,
+            location=location,
+            credentials=credentials,
+            labels=labels,
+            encryption_spec_key_name=encryption_spec_key_name,
+            staging_bucket=staging_bucket,
+            sync=True,
+        )
 
     @classmethod
     def upload_tensorflow_saved_model(
